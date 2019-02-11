@@ -19,7 +19,7 @@
 static Display *dpy;
 
 static char *
-smprintf(char *fmt, ...)
+smprintf(const char *fmt, ...)
 {
 	va_list fmtargs;
 	char *ret;
@@ -64,14 +64,14 @@ mktimes(const char *fmt, const char *tzname)
 }
 
 static void
-setstatus(char *str)
+setstatus(const char *str)
 {
 	XStoreName(dpy, DefaultRootWindow(dpy), str);
 	XSync(dpy, False);
 }
 
 static char *
-readfile(char *base, char *file)
+readfile(const char *base, const char *file)
 {
 	char *path, line[513];
 	FILE *fd;
@@ -92,7 +92,7 @@ readfile(char *base, char *file)
 }
 
 static char *
-getbattery(char *base)
+getbattery(const char *base)
 {
 	char *co, status;
 	int descap, remcap;
@@ -145,9 +145,7 @@ getbattery(char *base)
 int
 main(void)
 {
-	char *status;
-	char *bat;
-	char *time;
+	char *status, *bat, *time;
 
 	if (!(dpy = XOpenDisplay(NULL))) {
 		fprintf(stderr, "dwmstatus: cannot open display.\n");
