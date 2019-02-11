@@ -8,16 +8,13 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <strings.h>
-#include <sys/time.h>
 #include <time.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 
 #include <X11/Xlib.h>
 
-const char *TZ = "America/New_York";
-const char *TIMEFMT = "%F %T";
+#define BAT "/sys/class/power_supply/BAT0"
+#define TZ "America/New_York"
+#define TIMEFMT "%F %T"
 
 static Display *dpy;
 
@@ -45,12 +42,6 @@ smprintf(char *fmt, ...)
 	return ret;
 }
 
-static void
-settz(const char *tzname)
-{
-	setenv("TZ", tzname, 1);
-}
-
 static char *
 mktimes(const char *fmt, const char *tzname)
 {
@@ -58,7 +49,7 @@ mktimes(const char *fmt, const char *tzname)
 	time_t tim;
 	struct tm *timtm;
 
-	settz(tzname);
+	setenv("TZ", tzname, 1);
 	tim = time(NULL);
 	timtm = localtime(&tim);
 	if (timtm == NULL)
@@ -164,7 +155,7 @@ main(void)
 	}
 
 	for (;; sleep(1)) {
-		bat = getbattery("/sys/class/power_supply/BAT0");
+		bat = getbattery(BAT);
 		time = mktimes(TIMEFMT, TZ);
 
 		status = smprintf("BAT: %s | %s", bat, time);
