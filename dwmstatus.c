@@ -3,49 +3,64 @@
  * by 20h
  */
 
-#include <unistd.h>
+#include <sys/types.h>
+
+#include <err.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
+#include <sys/audioio.h>
+#include <sys/ioctl.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <X11/Xlib.h>
 
-#define BAT "/sys/class/power_supply/BAT0"
+#define MIXER "/dev/mixer"
 #define TZ "America/New_York"
 #define TIMEFMT "%F %T"
 
+typedef struct Buf Buf;
+
+struct Buf {
+	char *s;
+	size_t cap;
+};
+
 static Display *dpy;
 
-static char *
-smprintf(const char *fmt, ...)
+static int
+bprintf(Buf *buf, const char *fmt, ...)
 {
-	va_list fmtargs;
-	char *ret;
+	va_list args;
 	int len;
+	char *new;
 
-	va_start(fmtargs, fmt);
-	len = vsnprintf(NULL, 0, fmt, fmtargs);
-	va_end(fmtargs);
+	va_start(args, fmt);
+	len = vsnprintf(buf->s, buf->cap, fmt, args);
+	va_end(args);
 
-	ret = malloc(++len);
-	if (ret == NULL) {
-		perror("malloc");
-		exit(1);
+	if ((size_t)len + 1 > buf->cap) {
+		buf->cap = (size_t)len + 1;
+		if (!(new = realloc(buf->s, buf->cap)))
+			err(1, "realloc");
+		free(buf->s);
+		buf->s = new;
 	}
 
-	va_start(fmtargs, fmt);
-	vsnprintf(ret, len, fmt, fmtargs);
-	va_end(fmtargs);
+	va_start(args, fmt);
+	len = vsnprintf(buf->s, buf->cap, fmt, args);
+	va_end(args);
 
-	return ret;
+	return len;
 }
 
-static char *
-mktimes(const char *fmt, const char *tzname)
+static int
+datetime(Buf *buf, const char *fmt, const char *tzname)
 {
-	char buf[129];
+	char ts[129];
 	time_t tim;
 	struct tm *timtm;
 
@@ -53,14 +68,78 @@ mktimes(const char *fmt, const char *tzname)
 	tim = time(NULL);
 	timtm = localtime(&tim);
 	if (timtm == NULL)
-		return smprintf("");
+		return bprintf(buf, "");
 
-	if (!strftime(buf, sizeof(buf)-1, fmt, timtm)) {
-		fprintf(stderr, "strftime == 0\n");
-		return smprintf("");
+	if (!strftime(ts, sizeof(ts)-1, fmt, timtm)) {
+		warnx("not enough space for time");
+		return bprintf(buf, "");
 	}
 
-	return smprintf("%s", buf);
+	return bprintf(buf, "%s", ts);
+}
+
+static int
+findmixerdev(int fd)
+{
+	static int dev = -1; /* find the device once and keep it here */
+
+	int cls;
+	mixer_devinfo_t mdi;
+
+	if (dev >= 0)
+		return dev;
+
+	for (mdi.index = 0; ; mdi.index++) {
+		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+			warn("could not find mixer class");
+			return -1;
+		}
+
+		if (mdi.type == AUDIO_MIXER_CLASS &&
+		    !strcmp(mdi.label.name, AudioCoutputs)) {
+			cls = mdi.index;
+			break;
+		}
+	}
+
+	for (mdi.index = 0; ; mdi.index++) {
+		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+			warn("no more audio devices");
+			return -1;
+		}
+
+		if (mdi.mixer_class == cls &&
+		    mdi.type == AUDIO_MIXER_VALUE &&
+		    !strcmp(mdi.label.name, AudioNmaster))
+			return mdi.index;
+	}
+}
+
+static int
+volume(Buf *buf)
+{
+	int fd, vol;
+	mixer_ctrl_t mc;
+
+	if ((fd = open(MIXER, O_RDONLY)) < 0) {
+		warn("could not open mixer device");
+		return bprintf(buf, "");
+	}
+
+	if ((mc.dev = findmixerdev(fd)) < 0)
+		goto fail;
+	if (ioctl(fd, AUDIO_MIXER_READ, &mc) < 0) {
+		warn("could not get volume");
+		goto fail;
+	}
+
+	vol = 100 * mc.un.value.level[0] / 255;
+	close(fd);
+	return bprintf(buf, "%d", vol);
+
+fail:
+	close(fd);
+	return bprintf(buf, "");
 }
 
 static void
@@ -70,102 +149,27 @@ setstatus(const char *str)
 	XSync(dpy, False);
 }
 
-static char *
-readfile(const char *base, const char *file)
-{
-	char *path, line[513];
-	FILE *fd;
-
-	memset(line, 0, sizeof(line));
-
-	path = smprintf("%s/%s", base, file);
-	fd = fopen(path, "r");
-	free(path);
-	if (fd == NULL)
-		return NULL;
-
-	if (fgets(line, sizeof(line)-1, fd) == NULL)
-		return NULL;
-	fclose(fd);
-
-	return smprintf("%s", line);
-}
-
-static char *
-getbattery(const char *base)
-{
-	char *co, status;
-	int descap, remcap;
-
-	descap = -1;
-	remcap = -1;
-
-	co = readfile(base, "present");
-	if (co == NULL)
-		return smprintf("");
-	if (co[0] != '1') {
-		free(co);
-		return smprintf("not present");
-	}
-	free(co);
-
-	co = readfile(base, "charge_full_design");
-	if (co == NULL) {
-		co = readfile(base, "energy_full_design");
-		if (co == NULL)
-			return smprintf("");
-	}
-	sscanf(co, "%d", &descap);
-	free(co);
-
-	co = readfile(base, "charge_now");
-	if (co == NULL) {
-		co = readfile(base, "energy_now");
-		if (co == NULL)
-			return smprintf("");
-	}
-	sscanf(co, "%d", &remcap);
-	free(co);
-
-	co = readfile(base, "status");
-	if (!strncmp(co, "Discharging", 11)) {
-		status = '-';
-	} else if(!strncmp(co, "Charging", 8)) {
-		status = '+';
-	} else {
-		status = '?';
-	}
-
-	if (remcap < 0 || descap < 0)
-		return smprintf("invalid");
-
-	return smprintf("%.0f%%%c", ((float)remcap / (float)descap) * 100, status);
-}
-
 int
 main(void)
 {
-	char *status, *bat, *time;
+	Buf status, time, vol;
 
-	if (!(dpy = XOpenDisplay(NULL))) {
-		fprintf(stderr, "dwmstatus: cannot open display.\n");
-		return 1;
-	}
+	memset(&status, 0, sizeof(status));
+	memset(&time, 0, sizeof(time));
+	memset(&vol, 0, sizeof(vol));
+
+	if (!(dpy = XOpenDisplay(NULL)))
+		errx(1, "cannot open display");
 
 	for (;; sleep(1)) {
-		bat = getbattery(BAT);
-		time = mktimes(TIMEFMT, TZ);
+		datetime(&time, TIMEFMT, TZ);
+		volume(&vol);
 
-		status = smprintf("BAT: %s | %s", bat, time);
-		setstatus(status);
-
-		free(bat);
-		free(time);
-		free(status);
+		bprintf(&status, "VOL: %s%% | %s", vol.s, time.s);
+		setstatus(status.s);
 	}
 
 	XCloseDisplay(dpy);
-
 	return 0;
 }
 
