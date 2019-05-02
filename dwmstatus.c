@@ -36,7 +36,6 @@ bprintf(Buf *buf, const char *fmt, ...)
 {
 	va_list args;
 	int len;
-	char *new;
 
 	va_start(args, fmt);
 	len = vsnprintf(buf->s, buf->cap, fmt, args);
@@ -44,10 +43,8 @@ bprintf(Buf *buf, const char *fmt, ...)
 
 	if ((size_t)len + 1 > buf->cap) {
 		buf->cap = (size_t)len + 1;
-		if (!(new = realloc(buf->s, buf->cap)))
+		if (!(buf->s = realloc(buf->s, buf->cap)))
 			err(1, "realloc");
-		free(buf->s);
-		buf->s = new;
 	}
 
 	va_start(args, fmt);
