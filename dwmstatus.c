@@ -68,10 +68,13 @@ battery(Buf *buf)
 		warn("could not get battery status");
 		goto fail;
 	}
-	if (api.minutes_left == (unsigned)-1)
+	if (api.minutes_left == (unsigned)-1) {
+		close(fd);
 		return bprintf(buf, "%u%%", api.battery_life);
-	else
+	} else {
+		close(fd);
 		return bprintf(buf, "%u%% (%u:%u)", api.battery_life, api.minutes_left / 60, api.minutes_left % 60);
+	}
 
 fail:
 	close(fd);
