@@ -4,6 +4,9 @@
  */
 
 #include <sys/types.h>
+#include <sys/audioio.h>
+#include <sys/ioctl.h>
+#include <machine/apmvar.h>
 
 #include <err.h>
 #include <fcntl.h>
@@ -11,14 +14,11 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
-#include <sys/audioio.h>
-#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
 #include <X11/Xlib.h>
 
-#define MIXER "/dev/mixer"
 #define TZ "America/New_York"
 #define TIMEFMT "%F %T"
 
@@ -52,6 +52,30 @@ bprintf(Buf *buf, const char *fmt, ...)
 	va_end(args);
 
 	return len;
+}
+
+static int
+battery(Buf *buf)
+{
+	int fd;
+	struct apm_power_info api;
+
+	if ((fd = open("/dev/apm", O_RDONLY)) < 0) {
+		warn("could not open apm device for battery status");
+		return bprintf(buf, "");
+	}
+	if (ioctl(fd, APM_IOC_GETPOWER, &api) < 0) {
+		warn("could not get battery status");
+		goto fail;
+	}
+	if (api.minutes_left == (unsigned)-1)
+		return bprintf(buf, "%u%%", api.battery_life);
+	else
+		return bprintf(buf, "%u%% (%u:%u)", api.battery_life, api.minutes_left / 60, api.minutes_left % 60);
+
+fail:
+	close(fd);
+	return bprintf(buf, "");
 }
 
 static int
@@ -118,7 +142,7 @@ volume(Buf *buf)
 	int fd, vol;
 	mixer_ctrl_t mc;
 
-	if ((fd = open(MIXER, O_RDONLY)) < 0) {
+	if ((fd = open("/dev/mixer", O_RDONLY)) < 0) {
 		warn("could not open mixer device");
 		return bprintf(buf, "");
 	}
@@ -149,9 +173,10 @@ setstatus(const char *str)
 int
 main(void)
 {
-	Buf status, time, vol;
+	Buf status, bat, time, vol;
 
 	memset(&status, 0, sizeof(status));
+	memset(&bat, 0, sizeof(bat));
 	memset(&time, 0, sizeof(time));
 	memset(&vol, 0, sizeof(vol));
 
@@ -159,10 +184,11 @@ main(void)
 		errx(1, "cannot open display");
 
 	for (;; sleep(1)) {
+		battery(&bat);
 		datetime(&time, TIMEFMT, TZ);
 		volume(&vol);
 
-		bprintf(&status, "VOL: %s%% | %s", vol.s, time.s);
+		bprintf(&status, "BAT: %s | VOL: %s%% | %s", bat.s, vol.s, time.s);
 		setstatus(status.s);
 	}
 
