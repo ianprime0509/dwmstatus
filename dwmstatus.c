@@ -22,6 +22,10 @@
 #define TZ "America/New_York"
 #define TIMEFMT "%F %T"
 
+#define APM "/dev/apm"
+#define MIXER "/dev/mixer"
+#define TZDIR "/usr/share/zoneinfo"
+
 typedef struct Buf Buf;
 
 struct Buf {
@@ -30,6 +34,7 @@ struct Buf {
 };
 
 static Display *dpy;
+static int apmfd, mixerfd;
 
 static int
 bprintf(Buf *buf, const char *fmt, ...)
@@ -57,28 +62,17 @@ bprintf(Buf *buf, const char *fmt, ...)
 static int
 battery(Buf *buf)
 {
-	int fd;
 	struct apm_power_info api;
 
-	if ((fd = open("/dev/apm", O_RDONLY)) < 0) {
-		warn("could not open apm device for battery status");
+	if (ioctl(apmfd, APM_IOC_GETPOWER, &api) < 0) {
+		warn("could not get battery status");
 		return bprintf(buf, "");
 	}
-	if (ioctl(fd, APM_IOC_GETPOWER, &api) < 0) {
-		warn("could not get battery status");
-		goto fail;
-	}
-	if (api.minutes_left == (unsigned)-1) {
-		close(fd);
+	if (api.minutes_left == (unsigned)-1)
 		return bprintf(buf, "%u%%", api.battery_life);
-	} else {
-		close(fd);
-		return bprintf(buf, "%u%% (%u:%u)", api.battery_life, api.minutes_left / 60, api.minutes_left % 60);
-	}
-
-fail:
-	close(fd);
-	return bprintf(buf, "");
+	else
+		return bprintf(buf, "%u%% (%u:%u)", api.battery_life,
+		    api.minutes_left / 60, api.minutes_left % 60);
 }
 
 static int
@@ -103,7 +97,7 @@ datetime(Buf *buf, const char *fmt, const char *tzname)
 }
 
 static int
-findmixerdev(int fd)
+findmixerdev()
 {
 	static int dev = -1; /* find the device once and keep it here */
 
@@ -114,7 +108,7 @@ findmixerdev(int fd)
 		return dev;
 
 	for (mdi.index = 0; ; mdi.index++) {
-		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+		if (ioctl(mixerfd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
 			warn("could not find mixer class");
 			return -1;
 		}
@@ -127,7 +121,7 @@ findmixerdev(int fd)
 	}
 
 	for (mdi.index = 0; ; mdi.index++) {
-		if (ioctl(fd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
+		if (ioctl(mixerfd, AUDIO_MIXER_DEVINFO, &mdi) < 0) {
 			warn("no more audio devices");
 			return -1;
 		}
@@ -135,35 +129,25 @@ findmixerdev(int fd)
 		if (mdi.mixer_class == cls &&
 		    mdi.type == AUDIO_MIXER_VALUE &&
 		    !strcmp(mdi.label.name, AudioNmaster))
-			return mdi.index;
+			return dev = mdi.index;
 	}
 }
 
 static int
 volume(Buf *buf)
 {
-	int fd, vol;
+	int vol;
 	mixer_ctrl_t mc;
 
-	if ((fd = open("/dev/mixer", O_RDONLY)) < 0) {
-		warn("could not open mixer device");
+	if ((mc.dev = findmixerdev()) < 0)
+		return bprintf(buf, "");
+	if (ioctl(mixerfd, AUDIO_MIXER_READ, &mc) < 0) {
+		warn("could not get volume");
 		return bprintf(buf, "");
 	}
 
-	if ((mc.dev = findmixerdev(fd)) < 0)
-		goto fail;
-	if (ioctl(fd, AUDIO_MIXER_READ, &mc) < 0) {
-		warn("could not get volume");
-		goto fail;
-	}
-
 	vol = 100 * mc.un.value.level[0] / 255;
-	close(fd);
 	return bprintf(buf, "%d", vol);
-
-fail:
-	close(fd);
-	return bprintf(buf, "");
 }
 
 static void
@@ -185,6 +169,20 @@ main(void)
 
 	if (!(dpy = XOpenDisplay(NULL)))
 		errx(1, "cannot open display");
+
+	if (unveil(APM, "r") < 0)
+		err(1, "cannot unveil " APM);
+	if (unveil(MIXER, "r") < 0)
+		err(1, "cannot unveil " MIXER);
+	if (unveil(TZDIR, "r") < 0)
+		err(1, "cannot unveil " TZDIR);
+	if (unveil(NULL, NULL) < 0)
+		err(1, "unveil");
+
+	if ((apmfd = open(APM, O_RDONLY)) < 0)
+		err(1, "cannot open " APM);
+	if ((mixerfd = open(MIXER, O_RDONLY)) < 0)
+		err(1, "cannot open " MIXER);
 
 	for (;; sleep(1)) {
 		battery(&bat);
